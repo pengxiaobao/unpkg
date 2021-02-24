@@ -1,12 +1,14 @@
 import url from 'url';
-import https from 'https';
+import https from 'http';
 import gunzip from 'gunzip-maybe';
 import LRUCache from 'lru-cache';
 
 import bufferStream from './bufferStream.js';
 
+// 如果在npmRegistryURL找不到，就去sourceNpmRegistry再找一遍
+const sourceNpmRegistry = 'https://registry.npmjs.org';
 const npmRegistryURL =
-  process.env.NPM_REGISTRY_URL || 'https://registry.npmjs.org';
+  process.env.NPM_REGISTRY_URL || 'http://127.0.0.1:7001';
 
 const agent = new https.Agent({
   keepAlive: true
@@ -40,16 +42,17 @@ function encodePackageName(packageName) {
     : encodeURIComponent(packageName);
 }
 
-async function fetchPackageInfo(packageName, log) {
+async function fetchPackageInfo(packageName, log, registryUrl) {
   const name = encodePackageName(packageName);
-  const infoURL = `${npmRegistryURL}/${name}`;
+  const infoURL = `${registryUrl || npmRegistryURL}/${name}`;
 
   log.debug('Fetching package info for %s from %s', packageName, infoURL);
 
-  const { hostname, pathname } = url.parse(infoURL);
+  const { hostname, pathname, port } = url.parse(infoURL);
   const options = {
     agent: agent,
     hostname: hostname,
+    port: port,
     path: pathname,
     headers: {
       Accept: 'application/json'
@@ -63,6 +66,10 @@ async function fetchPackageInfo(packageName, log) {
   }
 
   if (res.statusCode === 404) {
+    if(registryUrl !== npmRegistryURL){
+      const towRes = await fetchPackageInfo(packageName, log, sourceNpmRegistry)
+      return towRes;
+    }
     return null;
   }
 
@@ -165,18 +172,19 @@ export async function getPackageConfig(packageName, version, log) {
 /**
  * Returns a stream of the tarball'd contents of the given package.
  */
-export async function getPackage(packageName, version, log) {
+export async function getPackage(packageName, version, log, registryUrl) {
   const tarballName = isScopedPackageName(packageName)
     ? packageName.split('/')[1]
     : packageName;
-  const tarballURL = `${npmRegistryURL}/${packageName}/-/${tarballName}-${version}.tgz`;
+  const tarballURL = `${registryUrl || npmRegistryURL}/${packageName}/-/${tarballName}-${version}.tgz`;
 
   log.debug('Fetching package for %s from %s', packageName, tarballURL);
 
-  const { hostname, pathname } = url.parse(tarballURL);
+  const { hostname, pathname, port } = url.parse(tarballURL);
   const options = {
     agent: agent,
     hostname: hostname,
+    port: port,
     path: pathname
   };
 
@@ -189,6 +197,10 @@ export async function getPackage(packageName, version, log) {
   }
 
   if (res.statusCode === 404) {
+    if(registryUrl !== npmRegistryURL){
+      const towRes = await getPackage(packageName, version, log, sourceNpmRegistry)
+      return towRes
+    }
     return null;
   }
 
