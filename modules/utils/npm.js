@@ -5,10 +5,10 @@ import LRUCache from 'lru-cache';
 
 import bufferStream from './bufferStream.js';
 
-// 如果在npmRegistryURL找不到，就去sourceNpmRegistry再找一遍
-const sourceNpmRegistry = 'https://registry.npmjs.org';
-const npmRegistryURL =
-  process.env.NPM_REGISTRY_URL || 'http://127.0.0.1:7001';
+// 包源路径数组，每次查找包都从所有路径查找，哪个先正确返回显示哪个
+const sourceNpmRegistry = ['http://115.182.90.219:31449', 'https://registry.npmjs.org'];
+// const npmRegistryURL =
+//   // process.env.NPM_REGISTRY_URL || 'http://127.0.0.1:7001';
 
 const agent = new https.Agent({
   keepAlive: true
@@ -26,67 +26,82 @@ const cache = new LRUCache({
 
 const notFound = '';
 
+/* 
+**  get函数请求
+**  发起请求
+**  将正确结果通过reject返回（后续Promise.All.catch中将正确结果输出）
+*/
 function get(options) {
   return new Promise((accept, reject) => {
-    https.get(options, accept).on('error', reject);
+    https.get(options, (result) => {
+      if (result.statusCode === 200) {
+        reject(result)
+      }
+      else {
+        accept(result)
+      }
+    }).on('error', accept);
   });
 }
-
+/* 包名处理 */
 function isScopedPackageName(packageName) {
   return packageName.startsWith('@');
 }
-
+/* 包名处理 */
 function encodePackageName(packageName) {
   return isScopedPackageName(packageName)
     ? `@${encodeURIComponent(packageName.substring(1))}`
     : encodeURIComponent(packageName);
 }
 
+/* 
+**获取包信息
+*/
 async function fetchPackageInfo(packageName, log, registryUrl) {
   const name = encodePackageName(packageName);
-  const infoURL = `${registryUrl || npmRegistryURL}/${name}`;
+  const promiseall = []
+  sourceNpmRegistry.map((vlaue) => {
+    let infoURL = `${vlaue}/${name}`
+    log.debug('Fetching package info for %s from %s', packageName, infoURL);
+    let { hostname, pathname, port } = url.parse(infoURL);
+    let options = {
+      agent: agent,
+      hostname: hostname,
+      port: port,
+      path: pathname,
+      headers: {
+        Accept: 'application/json'
+      }
+    };
+    promiseall.push(get(options))
+  }
+  )
 
-  log.debug('Fetching package info for %s from %s', packageName, infoURL);
+  let res = ''
+  await Promise.all(promiseall)
+    .then(async result => {
+      let content = await bufferStream(result[1]).toString('utf-8');
 
-  const { hostname, pathname, port } = url.parse(infoURL);
-  const options = {
-    agent: agent,
-    hostname: hostname,
-    port: port,
-    path: pathname,
-    headers: {
-      Accept: 'application/json'
-    }
-  };
-
-  const res = await get(options);
-
+      log.error(
+        'Error fetching info for %s (status: %s,%s)',
+        packageName,
+        result[0].statusCode,
+        result[1].statusCode
+      );
+      log.error(content);
+    })
+    .catch(result => {//当有返回值时才调用这里
+      res = result
+    })
   if (res.statusCode === 200) {
-    return bufferStream(res).then(JSON.parse);
+    return bufferStream(res).then(JSON.parse)
   }
-
-  if (res.statusCode === 404) {
-    if(registryUrl !== npmRegistryURL){
-      const towRes = await fetchPackageInfo(packageName, log, sourceNpmRegistry)
-      return towRes;
-    }
-    return null;
-  }
-
-  const content = (await bufferStream(res)).toString('utf-8');
-
-  log.error(
-    'Error fetching info for %s (status: %s)',
-    packageName,
-    res.statusCode
-  );
-  log.error(content);
-
-  return null;
+  return null
 }
 
 async function fetchVersionsAndTags(packageName, log) {
-  const info = await fetchPackageInfo(packageName, log);
+  const info = await fetchPackageInfo(packageName, log)
+
   return info && info.versions
     ? { versions: Object.keys(info.versions), tags: info['dist-tags'] }
     : null;
@@ -140,7 +155,7 @@ function cleanPackageConfig(config) {
 }
 
 async function fetchPackageConfig(packageName, version, log) {
-  const info = await fetchPackageInfo(packageName, log);
+  const info = await fetchPackageInfo(packageName, log)
   return info && info.versions && version in info.versions
     ? cleanPackageConfig(info.versions[version])
     : null;
@@ -176,43 +191,42 @@ export async function getPackage(packageName, version, log, registryUrl) {
   const tarballName = isScopedPackageName(packageName)
     ? packageName.split('/')[1]
     : packageName;
-  const tarballURL = `${registryUrl || npmRegistryURL}/${packageName}/-/${tarballName}-${version}.tgz`;
+  const promiseall = []
+  sourceNpmRegistry.map((vlaue) => {
+    let tarballURL = `${vlaue}/${packageName}/-/${tarballName}-${version}.tgz`
+    // let tarballURL = `${vlaue}/${packageName}`
+    let { hostname, pathname, port } = url.parse(tarballURL);
+    let options = {
+      agent: agent,
+      hostname: hostname,
+      port: port,
+      path: pathname
+    };
+    promiseall.push(get(options))
+  }
+  )
 
-  log.debug('Fetching package for %s from %s', packageName, tarballURL);
+  let res = ''
+  /* Promise.all改造，获取最快得到正确结果的数据 */
+  await Promise.all(promiseall).then(async result => {
+    // let content = await bufferStream(result[0]).toString('utf-8');
+    log.error(
+      'Error fetching info for %s (status: %s)',
+      packageName,
+      result[0].statusCode
+    );
+    // log.error(content);
+  })
+    .catch(result => {//当有正确返回值时才调用这里
+      res = result
+    })
 
-  const { hostname, pathname, port } = url.parse(tarballURL);
-  const options = {
-    agent: agent,
-    hostname: hostname,
-    port: port,
-    path: pathname
-  };
-
-  const res = await get(options);
+  // const res = await get(options);
 
   if (res.statusCode === 200) {
     const stream = res.pipe(gunzip());
     // stream.pause();
     return stream;
   }
-
-  if (res.statusCode === 404) {
-    if(registryUrl !== npmRegistryURL){
-      const towRes = await getPackage(packageName, version, log, sourceNpmRegistry)
-      return towRes
-    }
-    return null;
-  }
-
-  const content = (await bufferStream(res)).toString('utf-8');
-
-  log.error(
-    'Error fetching tarball for %s@%s (status: %s)',
-    packageName,
-    version,
-    res.statusCode
-  );
-  log.error(content);
-
   return null;
 }
